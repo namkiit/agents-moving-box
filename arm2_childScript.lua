@@ -1,0 +1,176 @@
+-- Global variable for movement duration
+duration = 2
+
+function sysCall_init()
+    -- Initialization of object handles
+    RefPosition = sim.getObjectHandle("ReferencePos2")
+    EndEffector = sim.getObjectHandle("EndEffector2")
+    Connector = sim.getObjectHandle("Connector2")
+    Proximity = sim.getObjectHandle("Proximity2")
+    Goal = sim.getObjectHandle("GoalPos2")
+    Box = sim.getObjectHandle("Box")
+    via = sim.getObjectHandle("viaPos2")
+    sensorHandle = sim.getObjectHandle("Sensor1")
+
+    -- Get initial positions of the Box, Goal, and Via objects
+    position_pick = sim.getObjectPosition(Box, -1)
+    position_goal = sim.getObjectPosition(Goal, -1)
+    position_via = sim.getObjectPosition(via, -1)
+
+    -- Adjusting the pick position slightly based on the box's length
+    position_pick[2] = position_pick[2] - 0.1
+    
+    -- Get original orientation
+    origin_orientation = sim.getObjectOrientation(RefPosition, -1)
+
+    -- Setting the initial position of the Reference object
+    sim.setObjectPosition(RefPosition, -1, position_via)
+
+    -- Defining states for the FSM
+    state_start, state_via2pick, state_pick, state_pick2via = 0, 1, 2, 3
+    state_via2goal, state_goal, state_goal2via, state_stop = 4, 5, 6, 7
+    state_stop, state_rotate = 8, 9
+
+    -- Initializing the FSM and variables
+    state = state_start
+    triggered = false
+end
+
+function sysCall_actuation()
+    if state == state_start and not t_f then
+        rotateRobot()
+    end
+
+    if triggered and not (state == state_stop or state == state_rotate) then
+        --reset orientation
+        sim.setObjectOrientation(RefPosition, -1, origin_orientation)
+        
+        t = sim.getSimulationTime()
+
+        -- Re-fetching the position of the Box
+        position_pick = sim.getObjectPosition(Box, -1)
+        position_pick[2] = position_pick[2] - 0.1
+
+        -- Running the FSM for pick-and-place
+        state = singlePickandPlace()
+    end
+    
+    if (state == state_stop or state == state_rotate) and t >= t_f then
+        rotateRobot()
+    end
+end
+
+function sysCall_sensing()
+    -- Reading the sensor and triggering the FSM
+    local res = sim.readProximitySensor(sensorHandle)
+    if res == 1 and not triggered then
+        triggered = true
+        t_f = sim.getSimulationTime() -- Start time for FSM transitions
+    end     
+end
+
+function sysCall_cleanup()
+    -- Cleanup code can be added here
+end
+
+function singlePickandPlace()
+    -- Handling state transitions and setting positions for movement
+    if state == state_start and t >= t_f then
+        transitionToState(state_via2pick, position_via, position_pick)
+    elseif state == state_via2pick and t >= t_f then
+        state = state_pick
+    elseif state == state_pick and t >= t_f then
+        transitionToState(state_pick2via, position_pick, position_via)
+    elseif state == state_pick2via and t >= t_f then
+        transitionToState(state_via2goal, position_via, position_goal)
+    elseif state == state_via2goal and t >= t_f then
+        state = state_release
+    elseif state == state_release and t >= t_f then
+        transitionToState(state_goal2via, position_goal, position_via)
+    elseif state == state_goal2via and t >= t_f then
+        state = state_stop
+    elseif state == state_stop then
+        state = state_rotate
+    end
+
+    -- Actions based on current state
+    handleStateActions()
+    
+    return state
+end
+
+-- Helper function for state transitions
+function transitionToState(newState, startPosition, endPosition)
+    state = newState
+    position_i, position_f = startPosition, endPosition
+    t_i = t_f
+    t_f = t_i + duration
+end
+
+-- Function to handle actions based on current state
+function handleStateActions()
+    if state == state_via2pick or state == state_pick2via or
+       state == state_via2goal or state == state_goal2via then
+        moveIK(position_i, position_f, t_i, t_f)
+    end
+
+    if state == state_pick then
+        shapeAttached = graspObject()
+    end
+
+    if state == state_release then
+        releaseObject(shapeAttached)
+    end
+    
+    if state == state_rotate then
+        rotateRobot()
+    end
+end
+
+
+function moveIK(position_i, position_f, t_i, t_f)
+    local x_i, y_i, z_i = position_i[1], position_i[2], position_i[3]
+    local x_f, y_f, z_f = position_f[1], position_f[2], position_f[3]
+
+    local dt = t_f - t_i
+    local vx, vy, vz = (x_f - x_i) / dt, (y_f - y_i) / dt, (z_f - z_i) / dt
+    local x, y, z = x_i + vx * (t - t_i), y_i + vy * (t - t_i), z_i + vz * (t - t_i)
+    
+-- Set the new position for the reference object
+    sim.setObjectPosition(RefPosition, -1, {x, y, z})
+end
+
+function graspObject()
+    local attachedShape
+    while true do
+        Box = sim.getObjectHandle("Box")
+        if Box == -1 then break end
+
+        local result3, distance = sim.checkProximitySensor(Proximity, Box)
+        if result3 == 1 then
+            attachedShape = Box
+            sim.setObjectParent(attachedShape, Connector, true)
+            break
+        end
+    end
+    return attachedShape
+end
+
+function releaseObject(shapeAttached)
+    if shapeAttached and shapeAttached ~= -1 then
+        sim.setObjectParent(shapeAttached, -1, true)
+    else
+        sim.addLog(sim.verbosity_scripterrors, "Invalid handle for shapeAttached.")
+    end
+end
+
+function rotateRobot()
+    local angle = 0.05
+    
+    -- Calculate new orientation based on rotation
+    local orientation = sim.getObjectOrientation(RefPosition, -1)
+    local newOrientation = {orientation[1], orientation[2], orientation[3] - angle}
+
+    -- Update the orientation of the reference object
+    sim.setObjectOrientation(RefPosition, -1, newOrientation)
+end
